@@ -1,12 +1,13 @@
-# claude-code-statusline-node
+# smart-statusline
 
-A three-line status line for [Claude Code](https://code.claude.com/docs), written in Node with **no dependencies and no `jq`** — so it runs on Windows out of the box, where `jq` usually isn't installed but Node almost always is.
+A three-line status line for [Claude Code](https://code.claude.com/docs), written in Node with **no dependencies and no `jq`**. It's a single portable script — the same file runs unmodified on Windows, Linux, and macOS, regardless of whether Claude Code itself is the native binary or the `npm install -g @anthropic-ai/claude-code` package.
 
 ```
 📁 my-project (main) +327 -40
 Fable 5.1  ⣿⣿⣿⣿⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀  13% · 🕐 1h6
 5h 35% ↻ 3h32 · 7d 78% ↻ 2d4h 📈 1d9h
 ```
+*(shown here with `emoji` icons so it renders in any README viewer — the actual default is a compact set of Nerd Font glyphs, see [Configuration](#configuration))*
 
 - **Line 1** — project directory, git branch, and lines added/removed this session.
 - **Line 2** — model, context window usage as a braille bar, and session duration.
@@ -16,13 +17,15 @@ Percentages are color-coded: green, yellow past the warning threshold, red past 
 
 ## Install
 
-Requires Node 14+ and Claude Code. Clone anywhere:
+Requires **Node.js 14+ available as `node` on your `PATH`**, separately from Claude Code — the native Claude Code binary bundles its own runtime but doesn't expose it for other scripts to use, so this needs its own system Node install no matter which way Claude Code got installed.
+
+Clone anywhere:
 
 ```bash
-git clone https://github.com/soaresfellipe/claude-code-statusline-node.git ~/.claude/statusline-node
+git clone https://github.com/soaresfellipe/smart-statusline.git ~/.claude/smart-statusline
 ```
 
-Then point `statusLine` at it in `~/.claude/settings.json`:
+Then point `statusLine` at it in `~/.claude/settings.json` — same file and format on macOS, Linux, and Windows:
 
 ```json
 {
@@ -34,7 +37,8 @@ Then point `statusLine` at it in `~/.claude/settings.json`:
 }
 ```
 
-On Windows use forward slashes in the path (`C:/Users/you/.claude/statusline-node/statusline.js`) — they work fine and avoid escaping backslashes in JSON.
+- **macOS/Linux**: `node "/home/you/.claude/smart-statusline/statusline.js"`. You can also drop the `node` prefix and call the script directly once it's executable (`chmod +x statusline.js`) — it runs via its own `#!/usr/bin/env node` shebang.
+- **Windows**: use forward slashes in the path (`C:/Users/you/.claude/smart-statusline/statusline.js`) — they work fine and avoid escaping backslashes in JSON.
 
 `refreshInterval` is optional but recommended: Claude Code only re-runs the status line on events like a new assistant message, so without a timer the reset countdowns freeze while the session sits idle.
 
@@ -49,7 +53,7 @@ Everything is driven by environment variables; there is no config file.
 | `CLAUDE_STATUSLINE_LINES` | `3` | Set to `1` to collapse everything onto a single line |
 | `CLAUDE_STATUSLINE_BAR_WIDTH` | `28` | Context bar width; `0` hides the bar |
 | `CLAUDE_STATUSLINE_BAR_STYLE` | `braille` | `braille` (`⣿⣀`), `blocks` (`█░`), or `ascii` (`#.`) |
-| `CLAUDE_STATUSLINE_ICONS` | `emoji` | `emoji`, `nerd` (Nerd Font glyphs), or `plain` (no icons) |
+| `CLAUDE_STATUSLINE_ICONS` | `nerd` | `nerd` (Nerd Font glyphs), `emoji`, or `plain` (no icons) |
 | `CLAUDE_STATUSLINE_NO_COLOR` | — | `1` disables ANSI color |
 | `CLAUDE_STATUSLINE_SHOW_COST` | — | `1` appends the session cost in USD to line 2 |
 | `CLAUDE_STATUSLINE_LIMIT_WARN` / `_LIMIT_CRIT` | `50` / `80` | Rate-limit thresholds for yellow / red |
@@ -57,13 +61,15 @@ Everything is driven by environment variables; there is no config file.
 | `CLAUDE_STATUSLINE_CACHE` | `~/.claude/cache/rate-limits.json` | Where the rate-limit windows (and usage history) are cached |
 | `CLAUDE_STATUSLINE_PROJECT` | `1` | Set to `0` to hide the 7-day time-to-100% projection |
 
+> The default `nerd` icon style needs a [Nerd Font](https://www.nerdfonts.com/) patched into your terminal. If the icons show up as blank boxes, your terminal font isn't patched — set `CLAUDE_STATUSLINE_ICONS` to `emoji` or `plain` instead.
+
 Set them in the `env` block of `settings.json`, or inline in the command:
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "node \"C:/Users/you/.claude/statusline-node/statusline.js\""
+    "command": "node \"C:/Users/you/.claude/smart-statusline/statusline.js\""
   },
   "env": {
     "CLAUDE_STATUSLINE_BAR_STYLE": "blocks",
