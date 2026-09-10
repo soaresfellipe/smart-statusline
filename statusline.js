@@ -98,6 +98,7 @@ const WINDOW_SECS = { seven_day: 7 * 86400, five_hour: 5 * 3600 };
 const PROJECT_KEYS = CFG.project ? ['seven_day'] : [];
 const MIN_SPAN_SECS = 20 * 60;
 const MAX_ETA_SECS = 28 * 86400;
+const RESET_DROP_PTS = 1; // a real renewal drops usage back near 0%, not a jitter-sized dip
 
 let cached = {};
 try { cached = JSON.parse(fs.readFileSync(CFG.cache, 'utf8')); } catch (_) {}
@@ -109,10 +110,15 @@ if (limits) {
     const w = limits[key];
     if (!w || w.used_percentage == null) continue;
     const resetsAt = w.resets_at || null;
+    const p = Number(w.used_percentage);
     let arr = history[key] || [];
-    // a window that just reset shows up as a new resets_at value; drop the old trend
-    if (arr.length && resetsAt && arr[arr.length - 1].r && arr[arr.length - 1].r !== resetsAt) arr = [];
-    arr.push({ t: now, p: Number(w.used_percentage), r: resetsAt });
+    // used% only climbs while a window is active, across every session that
+    // shares this cache file — a drop means the window actually renewed.
+    // (resets_at can shift slightly between reports even without a real
+    // reset, so it's tracked but not used to trigger the clear.)
+    const lastP = arr.length ? arr[arr.length - 1].p : null;
+    if (lastP != null && p < lastP - RESET_DROP_PTS) arr = [];
+    arr.push({ t: now, p, r: resetsAt });
     const span = WINDOW_SECS[key] || 7 * 86400;
     const windowStart = resetsAt ? resetsAt - span : now - span;
     history[key] = arr.filter((s) => s.t >= windowStart).slice(-300);

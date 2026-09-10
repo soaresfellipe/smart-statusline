@@ -88,12 +88,12 @@ A `spend_limit` window is also rendered automatically when present (it appears b
 
 ### The 7-day projection
 
-Each run records a `(time, used%)` sample for the 7-day window in the same cache file, then fits a straight line through the recent samples to estimate when usage would hit 100% at the current pace. A few notes:
+Each run records a `(time, used%)` sample for the 7-day window in the same cache file (shared by every Claude Code session on the machine), then fits a straight line through the samples recorded since the window last renewed to estimate when usage would hit 100% at that overall pace — not just the pace of whatever session happens to be running. A few notes:
 
 - It only shows up when that estimate lands **before** the window's own reset — if the reset would happen first, the count wipes itself out anyway, so there's nothing to flag.
 - It needs at least 20 minutes of recent history before it shows anything, so it won't appear on a session's first few prompts.
-- History resets whenever the window's `resets_at` changes (i.e. the 7-day window actually rolled over), so a fresh week starts with a fresh trend.
-- It's a straight-line fit on recent usage, not a forecast — a burst of heavy use will pull the estimate in sharply, and it settles back down as usage evens out.
+- History resets when used% actually drops back down (a real renewal), not just because the reported `resets_at` shifts slightly between checks — so a fresh week starts with a fresh trend, but a mid-week session boundary doesn't.
+- It's a straight-line fit on usage since the last renewal, not a forecast — a burst of heavy use will pull the estimate in sharply, and it settles back down as usage evens out over the rest of the week.
 
 ## Testing it
 
