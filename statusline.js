@@ -28,6 +28,7 @@
  *   CLAUDE_STATUSLINE_LIMIT_CRIT=80
  *   CLAUDE_STATUSLINE_CTX_WARN=60        context thresholds (yellow / red)
  *   CLAUDE_STATUSLINE_CTX_CRIT=80
+ *   CLAUDE_STATUSLINE_PROJECT=1          projected time-to-100% on the 7d window
  */
 
 const fs = require('fs');
@@ -50,6 +51,7 @@ const CFG = {
   crit: numEnv(E.CLAUDE_STATUSLINE_LIMIT_CRIT, 80),
   ctxWarn: numEnv(E.CLAUDE_STATUSLINE_CTX_WARN, 60),
   ctxCrit: numEnv(E.CLAUDE_STATUSLINE_CTX_CRIT, 80),
+  project: flag(E.CLAUDE_STATUSLINE_PROJECT, true),
 };
 
 const C = {
@@ -64,9 +66,9 @@ const C = {
 const fg = (c, s) => (CFG.color ? '\x1b[38;2;' + c[0] + ';' + c[1] + ';' + c[2] + 'm' + s + '\x1b[0m' : s);
 
 const ICONS = {
-  emoji: { folder: '\u{1F4C1}', clock: '\u{1F551}', reset: '↻' },
-  nerd:  { folder: '', clock: '', reset: '' },
-  plain: { folder: '', clock: '', reset: '~' },
+  emoji: { folder: '\u{1F4C1}', clock: '\u{1F551}', reset: '↻', trend: '\u{1F4C8}' },
+  nerd:  { folder: '', clock: '', reset: '', trend: '' },
+  plain: { folder: '', clock: '', reset: '~', trend: '->' },
 };
 const I = ICONS[CFG.icons] || ICONS.emoji;
 const BARS = {
@@ -86,23 +88,66 @@ const projectDir = (input.workspace && input.workspace.project_dir) || cwd;
 // rate_limits only shows up after the first API response of a session, and
 // Claude Code drops a window once it resets. The cache fills that early gap;
 // reused values are marked with a trailing ~.
+//
+// The same file also keeps a rolling history of used_percentage samples per
+// window, so projectEta() can fit a trend line and estimate a time-to-100%.
 const now = Math.floor(Date.now() / 1000);
+const WINDOW_SECS = { seven_day: 7 * 86400, five_hour: 5 * 3600 };
+const PROJECT_KEYS = CFG.project ? ['seven_day'] : [];
+const MIN_SPAN_SECS = 20 * 60;
+const MAX_ETA_SECS = 28 * 86400;
+
+let cached = {};
+try { cached = JSON.parse(fs.readFileSync(CFG.cache, 'utf8')); } catch (_) {}
+let history = cached.history || {};
+
 let limits = input.rate_limits || null;
 if (limits) {
+  for (const key of PROJECT_KEYS) {
+    const w = limits[key];
+    if (!w || w.used_percentage == null) continue;
+    const resetsAt = w.resets_at || null;
+    let arr = history[key] || [];
+    // a window that just reset shows up as a new resets_at value; drop the old trend
+    if (arr.length && resetsAt && arr[arr.length - 1].r && arr[arr.length - 1].r !== resetsAt) arr = [];
+    arr.push({ t: now, p: Number(w.used_percentage), r: resetsAt });
+    const span = WINDOW_SECS[key] || 7 * 86400;
+    const windowStart = resetsAt ? resetsAt - span : now - span;
+    history[key] = arr.filter((s) => s.t >= windowStart).slice(-300);
+  }
   try {
     fs.mkdirSync(path.dirname(CFG.cache), { recursive: true });
-    fs.writeFileSync(CFG.cache, JSON.stringify({ ts: now, rate_limits: limits }));
+    fs.writeFileSync(CFG.cache, JSON.stringify({ ts: now, rate_limits: limits, history }));
   } catch (_) {}
 } else {
-  try {
-    const cached = JSON.parse(fs.readFileSync(CFG.cache, 'utf8'));
-    const live = {};
-    for (const k of Object.keys(cached.rate_limits || {})) {
-      const w = cached.rate_limits[k];
-      if (w && (!w.resets_at || w.resets_at > now)) live[k] = Object.assign({ stale: true }, w);
-    }
-    if (Object.keys(live).length) limits = live;
-  } catch (_) {}
+  const live = {};
+  for (const k of Object.keys(cached.rate_limits || {})) {
+    const w = cached.rate_limits[k];
+    if (w && (!w.resets_at || w.resets_at > now)) live[k] = Object.assign({ stale: true }, w);
+  }
+  if (Object.keys(live).length) limits = live;
+}
+
+// Fits a line through the recorded (time, used%) samples for `key` and
+// projects when usage would cross 100% if the current pace holds.
+function projectEta(key) {
+  const arr = history[key];
+  if (!arr || arr.length < 2) return null;
+  const first = arr[0], last = arr[arr.length - 1];
+  if (last.t - first.t < MIN_SPAN_SECS) return null;
+  let n = 0, sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  for (const s of arr) {
+    const x = s.t - first.t;
+    n++; sumX += x; sumY += s.p; sumXY += x * s.p; sumXX += x * x;
+  }
+  const denom = n * sumXX - sumX * sumX;
+  if (!denom) return null;
+  const slope = (n * sumXY - sumX * sumY) / denom; // % per second
+  if (slope <= 0) return null;
+  const remaining = 100 - last.p;
+  if (remaining <= 0) return { seconds: 0 };
+  const seconds = remaining / slope;
+  return seconds <= MAX_ETA_SECS ? { seconds } : null;
 }
 
 // ---------- git ----------
@@ -128,9 +173,7 @@ function bar(p, col) {
   return fg(col, chars[0].repeat(filled)) + fg(C.dim, chars[1].repeat(w - filled));
 }
 
-function until(epoch) {
-  if (!epoch) return null;
-  let s = epoch - now;
+function fmtDur(s) {
   if (s <= 0) return 'now';
   const d = Math.floor(s / 86400); s -= d * 86400;
   const h = Math.floor(s / 3600); s -= h * 3600;
@@ -140,13 +183,18 @@ function until(epoch) {
   return m + 'm';
 }
 
+function until(epoch) {
+  if (!epoch) return null;
+  return fmtDur(epoch - now);
+}
+
 function dur(ms) {
   if (!ms) return null;
   const t = Math.floor(ms / 1000), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60);
   return h ? h + 'h' + m : m + 'm';
 }
 
-function limitSeg(key, label) {
+function limitSeg(key, label, opts) {
   const w = limits && limits[key];
   if (!w || w.used_percentage == null) return null;
   const p = Number(w.used_percentage);
@@ -154,6 +202,15 @@ function limitSeg(key, label) {
   const reset = until(w.resets_at);
   let out = fg(C.text, label) + ' ' + fg(col, p.toFixed(0) + '%' + (w.stale ? '~' : ''));
   if (reset) out += ' ' + fg(C.dim, (I.reset ? I.reset + ' ' : '') + reset);
+  if (opts && opts.project) {
+    const eta = projectEta(key);
+    if (eta) {
+      // red when the pace would blow through 100% before the window even resets
+      const resetRemaining = w.resets_at ? w.resets_at - now : Infinity;
+      const urgent = eta.seconds <= resetRemaining;
+      out += ' ' + fg(urgent ? C.red : C.dim, (I.trend ? I.trend + ' ' : '') + fmtDur(eta.seconds));
+    }
+  }
   return out;
 }
 
@@ -184,7 +241,7 @@ if (elapsed) l2.push((I.clock ? fg(C.gray, I.clock) + ' ' : '') + fg(C.text, ela
 if (CFG.showCost && cost.total_cost_usd) l2.push(fg(C.dim, '$' + Number(cost.total_cost_usd).toFixed(2)));
 
 // ---------- line 3: plan usage ----------
-const l3 = [limitSeg('five_hour', '5h'), limitSeg('seven_day', '7d'), limitSeg('spend_limit', 'spend')].filter(Boolean);
+const l3 = [limitSeg('five_hour', '5h'), limitSeg('seven_day', '7d', { project: true }), limitSeg('spend_limit', 'spend')].filter(Boolean);
 if (!l3.length) l3.push(fg(C.dim, 'plan usage unavailable'));
 
 // ---------- output ----------
