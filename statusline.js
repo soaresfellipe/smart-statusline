@@ -204,11 +204,11 @@ function limitSeg(key, label, opts) {
   if (reset) out += ' ' + fg(C.dim, (I.reset ? I.reset + ' ' : '') + reset);
   if (opts && opts.project) {
     const eta = projectEta(key);
-    if (eta) {
-      // red when the pace would blow through 100% before the window even resets
-      const resetRemaining = w.resets_at ? w.resets_at - now : Infinity;
-      const urgent = eta.seconds <= resetRemaining;
-      out += ' ' + fg(urgent ? C.red : C.dim, (I.trend ? I.trend + ' ' : '') + fmtDur(eta.seconds));
+    // only worth flagging if 100% would land before the window resets and
+    // wipes the count anyway
+    const resetRemaining = w.resets_at ? w.resets_at - now : MAX_ETA_SECS;
+    if (eta && eta.seconds <= resetRemaining) {
+      out += ' ' + fg(C.red, (I.trend ? I.trend + ' ' : '') + fmtDur(eta.seconds));
     }
   }
   return out;

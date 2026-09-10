@@ -5,12 +5,12 @@ A three-line status line for [Claude Code](https://code.claude.com/docs), writte
 ```
 📁 my-project (main) +327 -40
 Fable 5.1  ⣿⣿⣿⣿⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀  13% · 🕐 1h6
-5h 35% ↻ 3h32 · 7d 45% ↻ 7h52 📈 4d12h
+5h 35% ↻ 3h32 · 7d 78% ↻ 2d4h 📈 1d9h
 ```
 
 - **Line 1** — project directory, git branch, and lines added/removed this session.
 - **Line 2** — model, context window usage as a braille bar, and session duration.
-- **Line 3** — your plan's rolling **5-hour** and **7-day** usage windows, each with a countdown to its reset. The 7-day window also gets a 📈 projection: fitting a trend line through recently observed usage and estimating when it would cross 100% if that pace holds. It's red when that would happen before the window resets, gray otherwise, and hidden until there's enough recent history (or if the pace is too slow to matter).
+- **Line 3** — your plan's rolling **5-hour** and **7-day** usage windows, each with a countdown to its reset. The 7-day window also gets a 📈 projection, shown only when the current pace would hit 100% *before* the window resets — if the reset comes first, usage is fine and nothing is shown.
 
 Percentages are color-coded: green, yellow past the warning threshold, red past the critical one.
 
@@ -85,9 +85,9 @@ A `spend_limit` window is also rendered automatically when present (it appears b
 
 Each run records a `(time, used%)` sample for the 7-day window in the same cache file, then fits a straight line through the recent samples to estimate when usage would hit 100% at the current pace. A few notes:
 
+- It only shows up when that estimate lands **before** the window's own reset — if the reset would happen first, the count wipes itself out anyway, so there's nothing to flag.
 - It needs at least 20 minutes of recent history before it shows anything, so it won't appear on a session's first few prompts.
 - History resets whenever the window's `resets_at` changes (i.e. the 7-day window actually rolled over), so a fresh week starts with a fresh trend.
-- If the projected date is more than 28 days out, it's hidden rather than shown as noise — at that pace it isn't a real concern.
 - It's a straight-line fit on recent usage, not a forecast — a burst of heavy use will pull the estimate in sharply, and it settles back down as usage evens out.
 
 ## Testing it
