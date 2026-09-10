@@ -20,7 +20,7 @@
  *   CLAUDE_STATUSLINE_LINES=1            collapse everything onto one line
  *   CLAUDE_STATUSLINE_BAR_WIDTH=28       context bar width (0 hides the bar)
  *   CLAUDE_STATUSLINE_BAR_STYLE=braille  braille | blocks | ascii
- *   CLAUDE_STATUSLINE_ICONS=nerd         nerd (needs a Nerd Font) | emoji | plain
+ *   CLAUDE_STATUSLINE_ICONS=emoji        emoji | nerd (needs a Nerd Font) | plain
  *   CLAUDE_STATUSLINE_NO_COLOR=1         disable ANSI colors
  *   CLAUDE_STATUSLINE_CACHE=<path>       where to cache the rate-limit windows
  *   CLAUDE_STATUSLINE_SHOW_COST=1        append the session cost to line 2
@@ -43,7 +43,7 @@ const CFG = {
   lines: numEnv(E.CLAUDE_STATUSLINE_LINES, 3),
   barWidth: numEnv(E.CLAUDE_STATUSLINE_BAR_WIDTH, 28),
   barStyle: E.CLAUDE_STATUSLINE_BAR_STYLE || 'braille',
-  icons: E.CLAUDE_STATUSLINE_ICONS || 'nerd',
+  icons: E.CLAUDE_STATUSLINE_ICONS || 'emoji',
   color: E.CLAUDE_STATUSLINE_NO_COLOR !== '1',
   cache: E.CLAUDE_STATUSLINE_CACHE || path.join(os.homedir(), '.claude', 'cache', 'rate-limits.json'),
   showCost: flag(E.CLAUDE_STATUSLINE_SHOW_COST, false),
@@ -72,7 +72,7 @@ const ICONS = {
   emoji: { folder: '\u{1F4C1}', clock: '\u{1F551}', reset: '↻', trend: '\u{1F4C8}' },
   plain: { folder: '', clock: '', reset: '~', trend: '->' },
 };
-const I = ICONS[CFG.icons] || ICONS.nerd;
+const I = ICONS[CFG.icons] || ICONS.emoji;
 const BARS = {
   braille: ['⣿', '⣀'],
   blocks:  ['█', '░'],

@@ -7,7 +7,6 @@ A three-line status line for [Claude Code](https://code.claude.com/docs), writte
 Fable 5.1  ⣿⣿⣿⣿⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀  13% · 🕐 1h6
 5h 35% ↻ 3h32 · 7d 78% ↻ 2d4h 📈 1d9h
 ```
-*(shown here with `emoji` icons so it renders in any README viewer — the actual default is a compact set of Nerd Font glyphs, see [Configuration](#configuration))*
 
 - **Line 1** — project directory, git branch, and lines added/removed this session.
 - **Line 2** — model, context window usage as a braille bar, and session duration.
@@ -53,7 +52,7 @@ Everything is driven by environment variables; there is no config file.
 | `CLAUDE_STATUSLINE_LINES` | `3` | Set to `1` to collapse everything onto a single line |
 | `CLAUDE_STATUSLINE_BAR_WIDTH` | `28` | Context bar width; `0` hides the bar |
 | `CLAUDE_STATUSLINE_BAR_STYLE` | `braille` | `braille` (`⣿⣀`), `blocks` (`█░`), or `ascii` (`#.`) |
-| `CLAUDE_STATUSLINE_ICONS` | `nerd` | `nerd` (Nerd Font glyphs), `emoji`, or `plain` (no icons) |
+| `CLAUDE_STATUSLINE_ICONS` | `emoji` | `emoji`, `nerd` (Nerd Font glyphs), or `plain` (no icons) |
 | `CLAUDE_STATUSLINE_NO_COLOR` | — | `1` disables ANSI color |
 | `CLAUDE_STATUSLINE_SHOW_COST` | — | `1` appends the session cost in USD to line 2 |
 | `CLAUDE_STATUSLINE_LIMIT_WARN` / `_LIMIT_CRIT` | `50` / `80` | Rate-limit thresholds for yellow / red |
@@ -61,7 +60,7 @@ Everything is driven by environment variables; there is no config file.
 | `CLAUDE_STATUSLINE_CACHE` | `~/.claude/cache/rate-limits.json` | Where the rate-limit windows (and usage history) are cached |
 | `CLAUDE_STATUSLINE_PROJECT` | `1` | Set to `0` to hide the 7-day time-to-100% projection |
 
-> The default `nerd` icon style needs a [Nerd Font](https://www.nerdfonts.com/) patched into your terminal. If the icons show up as blank boxes, your terminal font isn't patched — set `CLAUDE_STATUSLINE_ICONS` to `emoji` or `plain` instead.
+> Prefer sharper glyphs over emoji? Set `CLAUDE_STATUSLINE_ICONS=nerd` — but only if your terminal has a [Nerd Font](https://www.nerdfonts.com/) patched in, otherwise the icons show up as blank boxes.
 
 Set them in the `env` block of `settings.json`, or inline in the command:
 
