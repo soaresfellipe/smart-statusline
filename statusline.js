@@ -5,7 +5,7 @@
  *
  *   [dir] my-project (main) +327 -40
  *   Opus 5   [bar]  13% . [clock] 1h6
- *   5h 35% ~ 3h32 . 7d 45% ~ 7h52
+ *   5h 35% ~ 3h32 . 7d 45% ~ 7h52 . Fable 20% ~ 3d4h
  *
  * Everything comes from the JSON Claude Code writes to stdin:
  *   workspace.project_dir, model.display_name
@@ -13,8 +13,10 @@
  *   cost.total_lines_added / _removed / total_duration_ms
  *   rate_limits.five_hour / .seven_day / .spend_limit (used_percentage + resets_at)
  *
- * Note: the payload has no per-model limit window. Usage from every model,
- * Opus and Fable included, lands in the same 5h and 7d buckets.
+ * The statusline payload has no per-model window, but the plan does have a
+ * Fable-scoped weekly limit. That one is fetched (at most every 5 minutes,
+ * cached in between) from the same OAuth usage endpoint that powers /usage,
+ * using the Claude Code credentials already on this machine.
  *
  * Environment variables (all optional):
  *   CLAUDE_STATUSLINE_LINES=1            collapse everything onto one line
@@ -28,12 +30,13 @@
  *   CLAUDE_STATUSLINE_LIMIT_CRIT=80
  *   CLAUDE_STATUSLINE_CTX_WARN=60        context thresholds (yellow / red)
  *   CLAUDE_STATUSLINE_CTX_CRIT=80
- *   CLAUDE_STATUSLINE_PROJECT=1          projected time-to-100% on the 7d window
+ *   CLAUDE_STATUSLINE_FABLE=1            set to 0 to hide the Fable weekly limit
  */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const https = require('https');
 const { execFileSync } = require('child_process');
 
 const E = process.env;
@@ -51,7 +54,7 @@ const CFG = {
   crit: numEnv(E.CLAUDE_STATUSLINE_LIMIT_CRIT, 80),
   ctxWarn: numEnv(E.CLAUDE_STATUSLINE_CTX_WARN, 60),
   ctxCrit: numEnv(E.CLAUDE_STATUSLINE_CTX_CRIT, 80),
-  project: flag(E.CLAUDE_STATUSLINE_PROJECT, true),
+  fable: flag(E.CLAUDE_STATUSLINE_FABLE, true),
 };
 
 const C = {
@@ -68,9 +71,9 @@ const fg = (c, s) => (CFG.color ? '\x1b[38;2;' + c[0] + ';' + c[1] + ';' + c[2] 
 const ICONS = {
   // Font Awesome glyphs from the Nerd Fonts "fa" set — needs a patched
   // (Nerd Font) terminal font to render as anything but a blank box.
-  nerd:  { folder: '', clock: '', reset: '', trend: '' },
-  emoji: { folder: '\u{1F4C1}', clock: '\u{1F551}', reset: '↻', trend: '\u{1F4C8}' },
-  plain: { folder: '', clock: '', reset: '~', trend: '->' },
+  nerd:  { folder: '', clock: '', reset: '' },
+  emoji: { folder: '\u{1F4C1}', clock: '\u{1F551}', reset: '↻' },
+  plain: { folder: '', clock: '', reset: '~' },
 };
 const I = ICONS[CFG.icons] || ICONS.emoji;
 const BARS = {
@@ -90,44 +93,13 @@ const projectDir = (input.workspace && input.workspace.project_dir) || cwd;
 // rate_limits only shows up after the first API response of a session, and
 // Claude Code drops a window once it resets. The cache fills that early gap;
 // reused values are marked with a trailing ~.
-//
-// The same file also keeps a rolling history of used_percentage samples per
-// window, so projectEta() can fit a trend line and estimate a time-to-100%.
 const now = Math.floor(Date.now() / 1000);
-const WINDOW_SECS = { seven_day: 7 * 86400, five_hour: 5 * 3600 };
-const PROJECT_KEYS = CFG.project ? ['seven_day'] : [];
-const MIN_SPAN_SECS = 20 * 60;
-const MAX_ETA_SECS = 28 * 86400;
-const RESET_DROP_PTS = 1; // a real renewal drops usage back near 0%, not a jitter-sized dip
 
 let cached = {};
 try { cached = JSON.parse(fs.readFileSync(CFG.cache, 'utf8')); } catch (_) {}
-let history = cached.history || {};
 
 let limits = input.rate_limits || null;
-if (limits) {
-  for (const key of PROJECT_KEYS) {
-    const w = limits[key];
-    if (!w || w.used_percentage == null) continue;
-    const resetsAt = w.resets_at || null;
-    const p = Number(w.used_percentage);
-    let arr = history[key] || [];
-    // used% only climbs while a window is active, across every session that
-    // shares this cache file — a drop means the window actually renewed.
-    // (resets_at can shift slightly between reports even without a real
-    // reset, so it's tracked but not used to trigger the clear.)
-    const lastP = arr.length ? arr[arr.length - 1].p : null;
-    if (lastP != null && p < lastP - RESET_DROP_PTS) arr = [];
-    arr.push({ t: now, p, r: resetsAt });
-    const span = WINDOW_SECS[key] || 7 * 86400;
-    const windowStart = resetsAt ? resetsAt - span : now - span;
-    history[key] = arr.filter((s) => s.t >= windowStart).slice(-300);
-  }
-  try {
-    fs.mkdirSync(path.dirname(CFG.cache), { recursive: true });
-    fs.writeFileSync(CFG.cache, JSON.stringify({ ts: now, rate_limits: limits, history }));
-  } catch (_) {}
-} else {
+if (!limits) {
   const live = {};
   for (const k of Object.keys(cached.rate_limits || {})) {
     const w = cached.rate_limits[k];
@@ -136,26 +108,100 @@ if (limits) {
   if (Object.keys(live).length) limits = live;
 }
 
-// Fits a line through the recorded (time, used%) samples for `key` and
-// projects when usage would cross 100% if the current pace holds.
-function projectEta(key) {
-  const arr = history[key];
-  if (!arr || arr.length < 2) return null;
-  const first = arr[0], last = arr[arr.length - 1];
-  if (last.t - first.t < MIN_SPAN_SECS) return null;
-  let n = 0, sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
-  for (const s of arr) {
-    const x = s.t - first.t;
-    n++; sumX += x; sumY += s.p; sumXY += x * s.p; sumXX += x * x;
+// ---------- Fable weekly limit ----------
+// The plan's Fable-scoped weekly window isn't in the statusline payload, but
+// the OAuth usage endpoint (the one behind /usage) reports it. It 429s under
+// frequent polling, so the fetched window is cached and refreshed at most
+// every FABLE_TTL_SECS; failed attempts back off for the same interval and
+// keep showing the last good value with a trailing ~.
+const FABLE_TTL_SECS = 5 * 60;
+const FABLE_STALE_SECS = 30 * 60;
+const FABLE_TIMEOUT_MS = 2500;
+
+// epoch seconds | epoch ms | ISO string -> epoch seconds (or null)
+function toEpochSecs(v) {
+  if (typeof v === 'number' && isFinite(v)) return v > 1e10 ? Math.floor(v / 1000) : Math.floor(v);
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number(v);
+    if (isFinite(n)) return n > 1e10 ? Math.floor(n / 1000) : Math.floor(n);
+    const t = Date.parse(v);
+    if (!isNaN(t)) return Math.floor(t / 1000);
   }
-  const denom = n * sumXX - sumX * sumX;
-  if (!denom) return null;
-  const slope = (n * sumXY - sumX * sumY) / denom; // % per second
-  if (slope <= 0) return null;
-  const remaining = 100 - last.p;
-  if (remaining <= 0) return { seconds: 0 };
-  const seconds = remaining / slope;
-  return seconds <= MAX_ETA_SECS ? { seconds } : null;
+  return null;
+}
+
+function oauthToken() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8'));
+    const o = raw.claudeAiOauth || raw;
+    if (o.expiresAt && toEpochSecs(o.expiresAt) < now) return null; // let Claude Code rotate it
+    return o.accessToken || o.access_token || null;
+  } catch (_) { return null; }
+}
+
+// Accepts the documented-by-observation shapes: a `limits` array entry of
+// kind weekly_scoped scoped to the Fable model, or (in case the schema
+// shifts) a fable_* top-level window with used_percentage/utilization.
+function pickFableWindow(j) {
+  if (!j || typeof j !== 'object') return null;
+  if (Array.isArray(j.limits)) {
+    const hit = j.limits.find((l) => l && l.kind === 'weekly_scoped' && isFinite(l.percent) &&
+      l.scope && l.scope.model && String(l.scope.model.display_name || '').trim().toLowerCase() === 'fable');
+    if (hit) return { used_percentage: Number(hit.percent), resets_at: toEpochSecs(hit.resets_at) };
+  }
+  for (const k of ['fable_weekly', 'fable_seven_day', 'seven_day_fable']) {
+    const w = j[k];
+    if (!w) continue;
+    const p = w.used_percentage != null ? w.used_percentage : w.utilization;
+    if (p != null && isFinite(Number(p))) return { used_percentage: Number(p), resets_at: toEpochSecs(w.resets_at) };
+  }
+  return null;
+}
+
+function fetchUsage(token) {
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: 'api.anthropic.com',
+      path: '/api/oauth/usage',
+      method: 'GET',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        'anthropic-beta': 'oauth-2025-04-20',
+        'User-Agent': 'claude-code/2.1.0',
+      },
+      timeout: FABLE_TIMEOUT_MS,
+    }, (res) => {
+      let body = '';
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => {
+        if (res.statusCode !== 200) return resolve(null);
+        try { resolve(JSON.parse(body)); } catch (_) { resolve(null); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+}
+
+async function fableWindow() {
+  if (!CFG.fable) return null;
+  const fc = cached.fable || {};
+  const attemptedAt = fc.attemptedAt || 0;
+  if (now - attemptedAt > FABLE_TTL_SECS) {
+    fc.attemptedAt = now; // back off on failure too, or a 429 storm feeds itself
+    const token = oauthToken();
+    const win = token ? pickFableWindow(await fetchUsage(token)) : null;
+    if (win) {
+      fc.window = win;
+      fc.fetchedAt = now;
+    }
+    cached.fable = fc;
+  }
+  const w = fc.window;
+  if (!w || w.used_percentage == null) return null;
+  if (w.resets_at && w.resets_at <= now) return null; // window rolled over; wait for a fresh fetch
+  return (fc.fetchedAt || 0) < now - FABLE_STALE_SECS ? Object.assign({ stale: true }, w) : w;
 }
 
 // ---------- git ----------
@@ -202,57 +248,65 @@ function dur(ms) {
   return h ? h + 'h' + m : m + 'm';
 }
 
-function limitSeg(key, label, opts) {
-  const w = limits && limits[key];
+function limitSeg(w, label) {
   if (!w || w.used_percentage == null) return null;
   const p = Number(w.used_percentage);
   const col = colorFor(p, CFG.warn, CFG.crit);
   const reset = until(w.resets_at);
   let out = fg(C.text, label) + ' ' + fg(col, p.toFixed(0) + '%' + (w.stale ? '~' : ''));
   if (reset) out += ' ' + fg(C.dim, (I.reset ? I.reset + ' ' : '') + reset);
-  if (opts && opts.project) {
-    const eta = projectEta(key);
-    // only worth flagging if 100% would land before the window resets and
-    // wipes the count anyway
-    const resetRemaining = w.resets_at ? w.resets_at - now : MAX_ETA_SECS;
-    if (eta && eta.seconds <= resetRemaining) {
-      out += ' ' + fg(C.red, (I.trend ? I.trend + ' ' : '') + fmtDur(eta.seconds));
-    }
-  }
   return out;
 }
 
 const SEP = fg(C.dim, ' · ');
 
-// ---------- line 1: project ----------
-const l1 = [];
-const projName = path.basename(projectDir.replace(/[\\/]+$/, '')) || projectDir;
-l1.push((I.folder ? fg(C.gray, I.folder) + ' ' : '') + fg(C.proj, projName));
-if (branch) l1.push(fg(C.gray, '(' + branch + ')'));
-const add = cost.total_lines_added || 0;
-const del = cost.total_lines_removed || 0;
-if (add) l1.push(fg(C.green, '+' + add));
-if (del) l1.push(fg(C.red, '-' + del));
+(async function main() {
+  const fable = await fableWindow();
 
-// ---------- line 2: model, context, elapsed ----------
-const l2 = [];
-if (input.model) l2.push(fg(C.text, String(input.model.display_name || input.model.id).replace(/^Claude\s+/i, '')));
-const ctx = input.context_window && input.context_window.used_percentage;
-if (ctx != null) {
-  const v = Number(ctx);
-  l2.push(bar(v, colorFor(v, CFG.ctxWarn, CFG.ctxCrit)) + '  ' + fg(C.gray, v.toFixed(0) + '%'));
-} else {
-  l2.push(fg(C.dim, 'ctx --'));
-}
-const elapsed = dur(cost.total_duration_ms);
-if (elapsed) l2.push((I.clock ? fg(C.gray, I.clock) + ' ' : '') + fg(C.text, elapsed));
-if (CFG.showCost && cost.total_cost_usd) l2.push(fg(C.dim, '$' + Number(cost.total_cost_usd).toFixed(2)));
+  try {
+    fs.mkdirSync(path.dirname(CFG.cache), { recursive: true });
+    fs.writeFileSync(CFG.cache, JSON.stringify({
+      ts: now,
+      rate_limits: input.rate_limits || cached.rate_limits,
+      fable: cached.fable,
+    }));
+  } catch (_) {}
 
-// ---------- line 3: plan usage ----------
-const l3 = [limitSeg('five_hour', '5h'), limitSeg('seven_day', '7d', { project: true }), limitSeg('spend_limit', 'spend')].filter(Boolean);
-if (!l3.length) l3.push(fg(C.dim, 'plan usage unavailable'));
+  // ---------- line 1: project ----------
+  const l1 = [];
+  const projName = path.basename(projectDir.replace(/[\\/]+$/, '')) || projectDir;
+  l1.push((I.folder ? fg(C.gray, I.folder) + ' ' : '') + fg(C.proj, projName));
+  if (branch) l1.push(fg(C.gray, '(' + branch + ')'));
+  const add = cost.total_lines_added || 0;
+  const del = cost.total_lines_removed || 0;
+  if (add) l1.push(fg(C.green, '+' + add));
+  if (del) l1.push(fg(C.red, '-' + del));
 
-// ---------- output ----------
-const row2 = l2[0] + (l2.length > 1 ? '  ' + l2.slice(1).join(SEP) : '');
-const rows = [l1.join(' '), row2, l3.join(SEP)];
-process.stdout.write((CFG.lines === 1 ? rows.join(SEP) : rows.join('\n')) + '\n');
+  // ---------- line 2: model, context, elapsed ----------
+  const l2 = [];
+  if (input.model) l2.push(fg(C.text, String(input.model.display_name || input.model.id).replace(/^Claude\s+/i, '')));
+  const ctx = input.context_window && input.context_window.used_percentage;
+  if (ctx != null) {
+    const v = Number(ctx);
+    l2.push(bar(v, colorFor(v, CFG.ctxWarn, CFG.ctxCrit)) + '  ' + fg(C.gray, v.toFixed(0) + '%'));
+  } else {
+    l2.push(fg(C.dim, 'ctx --'));
+  }
+  const elapsed = dur(cost.total_duration_ms);
+  if (elapsed) l2.push((I.clock ? fg(C.gray, I.clock) + ' ' : '') + fg(C.text, elapsed));
+  if (CFG.showCost && cost.total_cost_usd) l2.push(fg(C.dim, '$' + Number(cost.total_cost_usd).toFixed(2)));
+
+  // ---------- line 3: plan usage ----------
+  const l3 = [
+    limitSeg(limits && limits.five_hour, '5h'),
+    limitSeg(limits && limits.seven_day, '7d'),
+    limitSeg(fable, 'Fable'),
+    limitSeg(limits && limits.spend_limit, 'spend'),
+  ].filter(Boolean);
+  if (!l3.length) l3.push(fg(C.dim, 'plan usage unavailable'));
+
+  // ---------- output ----------
+  const row2 = l2[0] + (l2.length > 1 ? '  ' + l2.slice(1).join(SEP) : '');
+  const rows = [l1.join(' '), row2, l3.join(SEP)];
+  process.stdout.write((CFG.lines === 1 ? rows.join(SEP) : rows.join('\n')) + '\n');
+})();

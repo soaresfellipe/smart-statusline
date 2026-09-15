@@ -5,12 +5,12 @@ A three-line status line for [Claude Code](https://code.claude.com/docs), writte
 ```
 📁 my-project (main) +327 -40
 Fable 5.1  ⣿⣿⣿⣿⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀  13% · 🕐 1h6
-5h 35% ↻ 3h32 · 7d 78% ↻ 2d4h 📈 1d9h
+5h 35% ↻ 3h32 · 7d 78% ↻ 2d4h · Fable 39% ↻ 1d18h
 ```
 
 - **Line 1** — project directory, git branch, and lines added/removed this session.
 - **Line 2** — model, context window usage as a braille bar, and session duration.
-- **Line 3** — your plan's rolling **5-hour** and **7-day** usage windows, each with a countdown to its reset. The 7-day window also gets a 📈 projection, shown only when the current pace would hit 100% *before* the window resets — if the reset comes first, usage is fine and nothing is shown.
+- **Line 3** — your plan's rolling **5-hour** and **7-day** usage windows plus the **Fable weekly limit**, each with a countdown to its reset — see [The Fable weekly limit](#the-fable-weekly-limit).
 
 Percentages are color-coded: green, yellow past the warning threshold, red past the critical one.
 
@@ -57,8 +57,8 @@ Everything is driven by environment variables; there is no config file.
 | `CLAUDE_STATUSLINE_SHOW_COST` | — | `1` appends the session cost in USD to line 2 |
 | `CLAUDE_STATUSLINE_LIMIT_WARN` / `_LIMIT_CRIT` | `50` / `80` | Rate-limit thresholds for yellow / red |
 | `CLAUDE_STATUSLINE_CTX_WARN` / `_CTX_CRIT` | `60` / `80` | Context-usage thresholds for yellow / red |
-| `CLAUDE_STATUSLINE_CACHE` | `~/.claude/cache/rate-limits.json` | Where the rate-limit windows (and usage history) are cached |
-| `CLAUDE_STATUSLINE_PROJECT` | `1` | Set to `0` to hide the 7-day time-to-100% projection |
+| `CLAUDE_STATUSLINE_CACHE` | `~/.claude/cache/rate-limits.json` | Where the rate-limit windows (including the fetched Fable window) are cached |
+| `CLAUDE_STATUSLINE_FABLE` | `1` | Set to `0` to hide the Fable weekly limit |
 
 > Prefer sharper glyphs over emoji? Set `CLAUDE_STATUSLINE_ICONS=nerd` — but only if your terminal has a [Nerd Font](https://www.nerdfonts.com/) patched in, otherwise the icons show up as blank boxes.
 
@@ -82,18 +82,17 @@ Set them in the `env` block of `settings.json`, or inline in the command:
 The 5h/7d numbers come straight from the `rate_limits` object Claude Code passes on stdin. Two things worth knowing:
 
 - **`rate_limits` is only present for Claude.ai Pro and Max subscribers**, and only after the first API response of a session. Before that, this script falls back to the last values it cached and marks them with a trailing `~` rather than showing nothing. If a window has no cached value either, line 3 reads `plan usage unavailable`.
-- **There is no per-model limit window.** Usage from every model — Opus, Fable, Sonnet — is counted against the same 5h and 7d buckets, so there is no "Fable limit" to display separately.
+- **The stdin payload has no per-model window.** Usage from every model — Opus, Fable, Sonnet — is counted against the same 5h and 7d buckets there. The Fable segment comes from a different source; see below.
 
 A `spend_limit` window is also rendered automatically when present (it appears behind a Claude apps gateway with spend limits).
 
-### The 7-day projection
+### The Fable weekly limit
 
-Each run records a `(time, used%)` sample for the 7-day window in the same cache file (shared by every Claude Code session on the machine), then fits a straight line through the samples recorded since the window last renewed to estimate when usage would hit 100% at that overall pace — not just the pace of whatever session happens to be running. A few notes:
+Plans with Fable access get a **Fable-scoped weekly limit** in addition to the shared 5h/7d windows, but Claude Code doesn't (yet) include it in the statusline payload. This script fetches it from the same OAuth usage endpoint that powers `/usage` inside Claude Code, authenticating with the Claude Code credentials already on the machine (`~/.claude/.credentials.json`). No extra setup or login is needed.
 
-- It only shows up when that estimate lands **before** the window's own reset — if the reset would happen first, the count wipes itself out anyway, so there's nothing to flag.
-- It needs at least 20 minutes of recent history before it shows anything, so it won't appear on a session's first few prompts.
-- History resets when used% actually drops back down (a real renewal), not just because the reported `resets_at` shifts slightly between checks — so a fresh week starts with a fresh trend, but a mid-week session boundary doesn't.
-- It's a straight-line fit on usage since the last renewal, not a forecast — a burst of heavy use will pull the estimate in sharply, and it settles back down as usage evens out over the rest of the week.
+- The endpoint rate-limits aggressive polling, so the value is fetched **at most every 5 minutes** and cached in between — failed attempts (offline, expired token mid-rotation, endpoint hiccup) back off for the same interval and keep showing the last good value, marked with a trailing `~` once it's over 30 minutes old.
+- The segment disappears (rather than erroring) when there's nothing to show: no Fable limit on the plan, no readable credentials, or the window just rolled over and a fresh value hasn't been fetched yet.
+- It's an undocumented endpoint, so the parser tolerates the response-shape variants seen in the wild; if the schema drifts beyond that, the segment quietly drops out instead of breaking the status line.
 
 ## Testing it
 
