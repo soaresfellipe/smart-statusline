@@ -57,8 +57,9 @@ Everything is driven by environment variables; there is no config file.
 | `CLAUDE_STATUSLINE_SHOW_COST` | — | `1` appends the session cost in USD to line 2 |
 | `CLAUDE_STATUSLINE_LIMIT_WARN` / `_LIMIT_CRIT` | `50` / `80` | Rate-limit thresholds for yellow / red |
 | `CLAUDE_STATUSLINE_CTX_WARN` / `_CTX_CRIT` | `60` / `80` | Context-usage thresholds for yellow / red |
-| `CLAUDE_STATUSLINE_CACHE` | `~/.claude/cache/rate-limits.json` | Where the rate-limit windows (including the fetched Fable window) are cached |
+| `CLAUDE_STATUSLINE_CACHE` | `$CLAUDE_CONFIG_DIR/cache/rate-limits.json` (`~/.claude/…` by default) | Where the rate-limit windows (including the fetched Fable / Z.ai windows) are cached |
 | `CLAUDE_STATUSLINE_FABLE` | `1` | Set to `0` to hide the Fable weekly limit |
+| `CLAUDE_STATUSLINE_PROVIDER` | auto | `zai` forces the Z.ai (GLM Coding Plan) usage line; auto-detected when `ANTHROPIC_BASE_URL` points at `z.ai` / `bigmodel.cn` |
 
 > Prefer sharper glyphs over emoji? Set `CLAUDE_STATUSLINE_ICONS=nerd` — but only if your terminal has a [Nerd Font](https://www.nerdfonts.com/) patched in, otherwise the icons show up as blank boxes.
 
@@ -93,6 +94,19 @@ Plans with Fable access get a **Fable-scoped weekly limit** in addition to the s
 - The endpoint rate-limits aggressive polling, so the value is fetched **at most every 5 minutes** and cached in between — failed attempts (offline, expired token mid-rotation, endpoint hiccup) back off for the same interval and keep showing the last good value, marked with a trailing `~` once it's over 30 minutes old.
 - The segment disappears (rather than erroring) when there's nothing to show: no Fable limit on the plan, no readable credentials, or the window just rolled over and a fresh value hasn't been fetched yet.
 - It's an undocumented endpoint, so the parser tolerates the response-shape variants seen in the wild; if the schema drifts beyond that, the segment quietly drops out instead of breaking the status line.
+
+### Z.ai (GLM Coding Plan)
+
+When Claude Code is pointed at [Z.ai](https://docs.z.ai/devpack/tool/claude) (`ANTHROPIC_BASE_URL` on `api.z.ai` or `open.bigmodel.cn`), line 3 switches to the GLM Coding Plan instead of the Anthropic limits:
+
+```
+GLM Lite · 5h 4% ↻ 4h33 · 7d 55% ↻ 2d20h
+```
+
+- The plan level and its quota windows come from Z.ai's quota monitor endpoint (`/api/monitor/usage/quota/limit`), authenticated with the key Claude Code already uses (`ANTHROPIC_AUTH_TOKEN`, falling back to `~/.config/zai/api_key`).
+- It's fetched **at most once a minute** and cached; failures keep the last good value, marked `~` once it's over 30 minutes old. A window past its reset shows `0%~` until the next fetch.
+- The Fable and `spend` segments are hidden in this mode, since they describe an Anthropic plan.
+- If you run Z.ai under a separate `CLAUDE_CONFIG_DIR`, its cache lives there too, so the two profiles never show each other's numbers.
 
 ## Testing it
 

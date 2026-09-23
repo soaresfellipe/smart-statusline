@@ -31,6 +31,14 @@
  *   CLAUDE_STATUSLINE_CTX_WARN=60        context thresholds (yellow / red)
  *   CLAUDE_STATUSLINE_CTX_CRIT=80
  *   CLAUDE_STATUSLINE_FABLE=1            set to 0 to hide the Fable weekly limit
+ *   CLAUDE_STATUSLINE_PROVIDER=zai       force the Z.ai (GLM Coding Plan) usage line;
+ *                                        auto-detected from ANTHROPIC_BASE_URL
+ *
+ * Z.ai mode: when Claude Code is pointed at Z.ai (ANTHROPIC_BASE_URL on
+ * z.ai / bigmodel.cn), line 3 shows the GLM Coding Plan level and its 5h and
+ * weekly quota windows, fetched from Z.ai's quota monitor endpoint with the
+ * same key Claude Code uses (ANTHROPIC_AUTH_TOKEN), instead of the Anthropic
+ * plan limits.
  */
 
 const fs = require('fs');
@@ -42,13 +50,21 @@ const { execFileSync } = require('child_process');
 const E = process.env;
 const numEnv = (v, d) => (v !== undefined && !isNaN(parseFloat(v)) ? parseFloat(v) : d);
 const flag = (v, d) => (v === undefined ? d : v === '1' || v === 'true');
+const ZAI_HOST_RE = /(^|\.)(z\.ai|bigmodel\.cn)$/i;
+function baseHost() {
+  try { return new URL(E.ANTHROPIC_BASE_URL || '').hostname; } catch (_) { return ''; }
+}
+const PROVIDER = (E.CLAUDE_STATUSLINE_PROVIDER || (ZAI_HOST_RE.test(baseHost()) ? 'zai' : 'anthropic')).toLowerCase();
+// A relocated config dir (CLAUDE_CONFIG_DIR) gets its own cache, so two
+// profiles on one machine never show each other's windows.
+const CONFIG_DIR = E.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 const CFG = {
   lines: numEnv(E.CLAUDE_STATUSLINE_LINES, 3),
   barWidth: numEnv(E.CLAUDE_STATUSLINE_BAR_WIDTH, 28),
   barStyle: E.CLAUDE_STATUSLINE_BAR_STYLE || 'braille',
   icons: E.CLAUDE_STATUSLINE_ICONS || 'emoji',
   color: E.CLAUDE_STATUSLINE_NO_COLOR !== '1',
-  cache: E.CLAUDE_STATUSLINE_CACHE || path.join(os.homedir(), '.claude', 'cache', 'rate-limits.json'),
+  cache: E.CLAUDE_STATUSLINE_CACHE || path.join(CONFIG_DIR, 'cache', 'rate-limits.json'),
   showCost: flag(E.CLAUDE_STATUSLINE_SHOW_COST, false),
   warn: numEnv(E.CLAUDE_STATUSLINE_LIMIT_WARN, 50),
   crit: numEnv(E.CLAUDE_STATUSLINE_LIMIT_CRIT, 80),
@@ -204,6 +220,87 @@ async function fableWindow() {
   return (fc.fetchedAt || 0) < now - FABLE_STALE_SECS ? Object.assign({ stale: true }, w) : w;
 }
 
+// ---------- Z.ai (GLM Coding Plan) quota ----------
+// GET /api/monitor/usage/quota/limit returns the plan level plus one entry
+// per quota window: `unit` + `number` give the window length (unit 3 = hours,
+// unit 6 = weeks, observed), `percentage` the share used and `nextResetTime`
+// the reset in epoch ms. Cached like the Fable window: refreshed at most every
+// ZAI_TTL_SECS, failures back off and keep the last good value marked stale.
+const ZAI_TTL_SECS = 60;
+const ZAI_STALE_SECS = 30 * 60;
+const ZAI_TIMEOUT_MS = 2500;
+
+function zaiKey() {
+  if (E.ANTHROPIC_AUTH_TOKEN) return E.ANTHROPIC_AUTH_TOKEN;
+  if (E.ANTHROPIC_API_KEY) return E.ANTHROPIC_API_KEY;
+  try { return fs.readFileSync(path.join(os.homedir(), '.config', 'zai', 'api_key'), 'utf8').trim() || null; } catch (_) { return null; }
+}
+
+function zaiLabel(l) {
+  if (l.type === 'TIME_LIMIT') return 'MCP';
+  const n = Number(l.number) || 1;
+  if (l.unit === 3) return n + 'h';
+  if (l.unit === 6) return n * 7 + 'd';
+  return String(l.type || 'quota').toLowerCase().replace(/_limit$/, '');
+}
+
+function fetchZaiQuota(key) {
+  const host = ZAI_HOST_RE.test(baseHost()) ? baseHost() : 'api.z.ai';
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: host,
+      path: '/api/monitor/usage/quota/limit',
+      method: 'GET',
+      headers: { Authorization: key, 'Accept-Language': 'en-US,en' },
+      timeout: ZAI_TIMEOUT_MS,
+    }, (res) => {
+      let body = '';
+      res.on('data', (d) => { body += d; });
+      res.on('end', () => {
+        if (res.statusCode !== 200) return resolve(null);
+        try {
+          const j = JSON.parse(body);
+          const d = j && j.success !== false && j.data;
+          if (!d || !Array.isArray(d.limits)) return resolve(null);
+          resolve({
+            level: d.level || null,
+            windows: d.limits.filter((l) => l && isFinite(Number(l.percentage))).map((l) => ({
+              label: zaiLabel(l),
+              used_percentage: Number(l.percentage),
+              resets_at: toEpochSecs(l.nextResetTime),
+            })),
+          });
+        } catch (_) { resolve(null); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+}
+
+async function zaiQuota() {
+  const zc = cached.zai || {};
+  if (now - (zc.attemptedAt || 0) > ZAI_TTL_SECS) {
+    zc.attemptedAt = now;
+    const key = zaiKey();
+    const q = key ? await fetchZaiQuota(key) : null;
+    if (q) {
+      zc.quota = q;
+      zc.fetchedAt = now;
+    }
+    cached.zai = zc;
+  }
+  const q = zc.quota;
+  if (!q) return null;
+  const stale = (zc.fetchedAt || 0) < now - ZAI_STALE_SECS;
+  // A window past its reset is back at 0% until the next fetch says otherwise.
+  const windows = q.windows.map((w) => (w.resets_at && w.resets_at <= now
+    ? { label: w.label, used_percentage: 0, stale: true }
+    : Object.assign({}, w, stale ? { stale: true } : {})));
+  return { level: q.level, windows };
+}
+
 // ---------- git ----------
 function git(args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1500 });
@@ -261,7 +358,9 @@ function limitSeg(w, label) {
 const SEP = fg(C.dim, ' · ');
 
 (async function main() {
-  const fable = await fableWindow();
+  const zai = PROVIDER === 'zai';
+  const fable = zai ? null : await fableWindow();
+  const zq = zai ? await zaiQuota() : null;
 
   try {
     fs.mkdirSync(path.dirname(CFG.cache), { recursive: true });
@@ -269,6 +368,7 @@ const SEP = fg(C.dim, ' · ');
       ts: now,
       rate_limits: input.rate_limits || cached.rate_limits,
       fable: cached.fable,
+      zai: cached.zai,
     }));
   } catch (_) {}
 
@@ -297,13 +397,21 @@ const SEP = fg(C.dim, ' · ');
   if (CFG.showCost && cost.total_cost_usd) l2.push(fg(C.dim, '$' + Number(cost.total_cost_usd).toFixed(2)));
 
   // ---------- line 3: plan usage ----------
-  const l3 = [
-    limitSeg(limits && limits.five_hour, '5h'),
-    limitSeg(limits && limits.seven_day, '7d'),
-    limitSeg(fable, 'Fable'),
-    limitSeg(limits && limits.spend_limit, 'spend'),
-  ].filter(Boolean);
-  if (!l3.length) l3.push(fg(C.dim, 'plan usage unavailable'));
+  let l3;
+  if (zai) {
+    l3 = zq ? zq.windows.map((w) => limitSeg(w, w.label)).filter(Boolean) : [];
+    if (!l3.length) l3.push(fg(C.dim, 'Z.ai usage unavailable'));
+    const lvl = zq && zq.level ? zq.level.charAt(0).toUpperCase() + zq.level.slice(1) : '';
+    l3.unshift(fg(C.gray, ('GLM ' + lvl).trim()));
+  } else {
+    l3 = [
+      limitSeg(limits && limits.five_hour, '5h'),
+      limitSeg(limits && limits.seven_day, '7d'),
+      limitSeg(fable, 'Fable'),
+      limitSeg(limits && limits.spend_limit, 'spend'),
+    ].filter(Boolean);
+    if (!l3.length) l3.push(fg(C.dim, 'plan usage unavailable'));
+  }
 
   // ---------- output ----------
   const row2 = l2[0] + (l2.length > 1 ? '  ' + l2.slice(1).join(SEP) : '');
